@@ -155,6 +155,46 @@ typedef struct {
     ngx_array_t complex_values;
 } ngx_http_webtcl_loc_conf_t;
 
+static char * webtcl_trace_ngxvars_read(ClientData clientData,
+  Tcl_Interp *interp, const char *name1, const char *name2, int flags){
+  if( !(flags & TCL_TRACE_READS) ) return NULL;
+
+  if( NULL == Tcl_GetVar2(interp, name1, name2, flags)){
+
+    ngx_http_request_t *r = (ngx_http_request_t *) clientData;
+
+    ngx_str_t ngx_var_name;
+    ngx_uint_t key;
+    ngx_variable_value_t *value;
+
+    ngx_var_name.data = (u_char *)name2;
+    ngx_var_name.len  = strlen(name2);
+
+    u_char *low = ngx_pnalloc(r->pool, ngx_var_name.len);
+    key = ngx_hash_strlow(low, ngx_var_name.data, ngx_var_name.len);
+
+
+    value = ngx_http_get_variable(r, &ngx_var_name, key);
+
+    Tcl_Obj *objValue = Tcl_NewStringObj((const char *)value->data, value->len);
+    Tcl_SetVar2Ex(interp, name1, name2, objValue, flags);
+  }
+
+  return NULL;
+
+}
+
+static inline void ngx_http_webtcl_trace_ngxvars(Tcl_Interp *interp, ngx_http_request_t *r){
+    Tcl_SetVar2(interp, "ngxvars", "webtcl", "1", TCL_GLOBAL_ONLY);
+    Tcl_UnsetVar2(interp, "ngxvars", "webtcl", TCL_GLOBAL_ONLY);
+    Tcl_TraceVar(interp, "ngxvars", TCL_TRACE_READS | TCL_GLOBAL_ONLY, webtcl_trace_ngxvars_read, r);
+}
+
+static inline void ngx_http_webtcl_untrace_ngxvars(Tcl_Interp *interp, ngx_http_request_t *r){
+    Tcl_UntraceVar(interp, "ngxvars", TCL_TRACE_READS | TCL_GLOBAL_ONLY, webtcl_trace_ngxvars_read, r);
+}
+
+
 static void * ngx_http_webtcl_create_loc_conf(ngx_conf_t *cf)
 {
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0, "webtcl module create location config in %d", ngx_process);
@@ -166,9 +206,18 @@ static void * ngx_http_webtcl_create_loc_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    Tcl_Interp *interp = Tcl_CreateInterp();
+
     conf->foo = NGX_CONF_UNSET_UINT;
-    conf->interp = Tcl_CreateInterp();
-    // Tcl_Init(conf->interp);
+    conf->interp = interp;
+
+    if(0){
+      Tcl_Init(conf->interp);
+    }
+
+    Tcl_SetVar2(interp, "ngxvars", "webtcl", "1", TCL_GLOBAL_ONLY);
+    Tcl_UnsetVar2(interp, "ngxvars", "webtcl", TCL_GLOBAL_ONLY);
+    Tcl_TraceVar(interp, "ngxvars", TCL_TRACE_READS | TCL_GLOBAL_ONLY, webtcl_trace_ngxvars_read, NULL);
 
     ngx_array_init(&conf->webtcl_cmds, cf->pool, 1, sizeof(ngx_array_t));
     ngx_array_init(&conf->access_cmds, cf->pool, 1, sizeof(ngx_array_t));
@@ -269,7 +318,7 @@ static char * ngx_http_command_webtcl(ngx_conf_t *cf, ngx_command_t *cmd, void *
     if( ngx_str_equal("set", &subcmd) ){
       /* webtcl set name value */
       ngx_http_variable_t *var;
-      var = ngx_http_add_variable(cf, &argv[2], NGX_HTTP_VAR_CHANGEABLE); 
+      var = ngx_http_add_variable(cf, &argv[2], NGX_HTTP_VAR_CHANGEABLE);
 
       webtcl_variable_ctx *vctx;
       vctx = ngx_pcalloc(cf->pool, sizeof(webtcl_variable_ctx));
@@ -487,6 +536,8 @@ static ngx_int_t ngx_http_webtcl_handler_content(ngx_http_request_t *r)
 
     Tcl_Interp *interp = webtcl_conf->interp;
 
+    ngx_http_webtcl_trace_ngxvars(interp, r);
+
     ngx_buf_t *buf; // ngx_calloc_buf(r->pool);
 
     if(0){
@@ -579,6 +630,8 @@ static ngx_int_t ngx_http_webtcl_handler_content(ngx_http_request_t *r)
     ngx_http_output_filter(r, &out);
 
     ngx_http_finalize_request(r, NGX_DONE);
+
+    ngx_http_webtcl_untrace_ngxvars(interp, r);
 
     return NGX_OK;
 }
