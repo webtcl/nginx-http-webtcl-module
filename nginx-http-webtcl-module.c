@@ -121,12 +121,27 @@ static ngx_command_t  ngx_http_webtcl_commands[] = {
     ngx_null_command
 };
 
+static void ngx_http_webtcl_tcl_service(ngx_event_t *ev){
+  Tcl_SetServiceMode(TCL_SERVICE_ALL);
+  Tcl_ServiceAll();
+
+  ngx_post_event(ev, &ngx_posted_next_events);
+}
+
 static ngx_int_t init_module(ngx_cycle_t *cycle){
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "webtcl init_module in %d", ngx_process);
     return NGX_OK;
 }
+
 static ngx_int_t init_process(ngx_cycle_t *cycle){
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "webtcl init_process in %d", ngx_process);
+
+    ngx_event_t *ev = ngx_pnalloc(cycle->pool, sizeof(ngx_event_t));
+    ev->handler = ngx_http_webtcl_tcl_service;
+    ev->posted  = 0;
+    ev->data    = cycle;
+    ngx_post_event(ev, &ngx_posted_events);
+
     return NGX_OK;
 }
 
@@ -226,7 +241,6 @@ static void * ngx_http_webtcl_create_loc_conf(ngx_conf_t *cf)
 
     return conf;
 }
-
 
 static char * ngx_http_webtcl_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -574,9 +588,11 @@ static ngx_int_t ngx_http_webtcl_handler_content(ngx_http_request_t *r)
           ngx_str_t *arg_script = argv+2;
 	  Tcl_Preserve(interp);
 	  int ret = Tcl_EvalEx(interp, (const char *) arg_script->data, arg_script->len, 0);
-          if( 1 || ret==TCL_OK ){
+          if( ret==TCL_OK ){
 	    const char *tcl_result = Tcl_GetStringResult(interp);
 	    buf->last = ngx_sprintf(buf->last, "%s", tcl_result);
+          } else {
+	    buf->last = ngx_sprintf(buf->last, "%s", "Error: when run 'webtcl content'");
           }
 	  Tcl_Release(interp);
        }else if( ngx_str_equal("header", subcmd) ){
