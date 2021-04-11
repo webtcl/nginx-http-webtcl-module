@@ -5,12 +5,11 @@
 
 static char * ngx_zstrdup(ngx_pool_t *pool, ngx_str_t *src)
 {
-  
     char  *dst;
     int zero = 1;
 
-    ngx_uint_t dest_len = src->len; 
-    if(zero) dest_len += 1; 
+    ngx_uint_t dest_len = src->len;
+    if(zero) dest_len += 1;
 
     dst = ngx_pnalloc(pool, dest_len);
     if (dst == NULL) {
@@ -26,11 +25,10 @@ static char * ngx_zstrdup(ngx_pool_t *pool, ngx_str_t *src)
 
 static u_char * ngx_str_copy(ngx_pool_t *pool, ngx_str_t *dest, ngx_str_t *src, int zero)
 {
-  
     u_char  *dst;
 
-    ngx_uint_t dest_len = src->len; 
-    if(zero) dest_len += 1; 
+    ngx_uint_t dest_len = src->len;
+    if(zero) dest_len += 1;
 
     dst = ngx_pnalloc(pool, dest_len);
     if (dst == NULL) {
@@ -49,13 +47,12 @@ static u_char * ngx_str_copy(ngx_pool_t *pool, ngx_str_t *dest, ngx_str_t *src, 
 #if 1
 static ngx_str_t * ngx_str_clone(ngx_pool_t *pool, ngx_str_t *src, int zero)
 {
-  
     ngx_str_t *dest = ngx_pnalloc(pool, sizeof(ngx_str_t));
 
     u_char  *dst;
 
-    ngx_uint_t dest_len = src->len; 
-    if(zero) dest_len += 1; 
+    ngx_uint_t dest_len = src->len;
+    if(zero) dest_len += 1;
 
     dst = ngx_pnalloc(pool, dest_len);
     if (dst == NULL) {
@@ -122,11 +119,57 @@ static ngx_command_t  ngx_http_webtcl_commands[] = {
 };
 
 static void ngx_http_webtcl_tcl_service(ngx_event_t *ev){
-  Tcl_SetServiceMode(TCL_SERVICE_ALL);
-  Tcl_ServiceAll();
-
+  /* Tcl_ServiceAll() may block.
+   * Make sure this event always happen.
+   * Set timer to make sure nginx event loop don't block.
+   */
+  ngx_add_timer(ev, 100);  /* make sure nginx event loop don't block */
   ngx_post_event(ev, &ngx_posted_next_events);
+
+  Tcl_ServiceAll();
 }
+
+void Tcl_EventNginx_Setup(ClientData clientData, int flags){
+  ngx_cycle_t *cycle = (ngx_cycle_t *) clientData;
+
+  #if 0
+  ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "Tcl_EventNginx_Setup %d", Tcl_GetServiceMode());
+  #endif
+
+  /* Make sure Tcl event loop don't block forever */
+  Tcl_Time maxWait = {.sec  = 0, .usec = 100};
+  Tcl_SetMaxBlockTime(&maxWait);
+
+  if(0){
+    /* Tcl_DoOneEvent() has do this before calling event setup proc */
+    Tcl_SetServiceMode(TCL_SERVICE_NONE);
+  }
+
+  ngx_process_events_and_timers(cycle);
+
+  return;
+}
+
+void Tcl_EventNginx_Check(ClientData clientData, int flags){
+  #if 0
+  ngx_cycle_t *cycle = (ngx_cycle_t *) clientData;
+  ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "Tcl_EventNginx_Check");
+  #endif
+
+  return;
+}
+
+#if 0
+int Tcl_WaitForEvent(const Tcl_Time *timePtr){
+  if( timePtr==NULL ){
+    // no maximum wait time
+  }
+  for(;;){
+    Tcl_SetServiceMode(TCL_SERVICE_NONE);
+    ngx_process_events_and_timers(ngx_cycle_t *cycle);
+  }
+}
+#endif
 
 static ngx_int_t init_module(ngx_cycle_t *cycle){
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "webtcl init_module in %d", ngx_process);
@@ -136,11 +179,23 @@ static ngx_int_t init_module(ngx_cycle_t *cycle){
 static ngx_int_t init_process(ngx_cycle_t *cycle){
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "webtcl init_process in %d", ngx_process);
 
-    ngx_event_t *ev = ngx_pnalloc(cycle->pool, sizeof(ngx_event_t));
-    ev->handler = ngx_http_webtcl_tcl_service;
-    ev->posted  = 0;
-    ev->data    = cycle;
-    ngx_post_event(ev, &ngx_posted_events);
+    do {
+      /* Call Tcl event loop inside Nginx event loop. */
+      ngx_event_t *ev = ngx_pnalloc(cycle->pool, sizeof(ngx_event_t));
+      ev->handler = ngx_http_webtcl_tcl_service;
+      ev->posted  = 0;
+      ev->data    = cycle;
+
+      Tcl_SetServiceMode(TCL_SERVICE_ALL);
+      ngx_http_webtcl_tcl_service(ev);
+      // ngx_add_timer(ev, 100);  /* make sure nginx event loop don't block */
+      // ngx_post_event(ev, &ngx_posted_events);
+    }while(0);
+
+    do {
+      /* Call Nginx event loop inside Tcl event loop. */
+      Tcl_CreateEventSource(Tcl_EventNginx_Setup, Tcl_EventNginx_Check, cycle);
+    }while(0);
 
     return NGX_OK;
 }
@@ -350,23 +405,23 @@ static char * ngx_http_command_webtcl(ngx_conf_t *cf, ngx_command_t *cmd, void *
       #if 1
       ngx_http_complex_value_t           *cv;
       ngx_http_compile_complex_value_t   ccv;
-      
+
       cv = ngx_array_push(&webtcl_conf->complex_values);
 
       ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
-      
+
       ccv.cf = cf;
       ccv.value = ngx_str_clone(cf->pool, &argv[3], 0);
       ccv.complex_value = cv;
       ccv.zero = 1;
       ccv.conf_prefix = 0;
-      
+
       fprintf(stderr, "webtcl variable compile %.*s\n", (int) argv[3].len, argv[3].data);
       if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
       fprintf(stderr, "webtcl variable compile fail %.*s\n", (int) argv[3].len, argv[3].data);
           return NGX_CONF_ERROR;
       }
-     
+
       // ngx_log_error(NGX_LOG_ERR, cf->log, 0, "webtcl variable %.*s", argv[3].len, argv[3].data);
       fprintf(stderr, "webtcl variable %.*s\n", (int) argv[3].len, argv[3].data);
 
@@ -449,7 +504,7 @@ static char * ngx_http_command_webtcl(ngx_conf_t *cf, ngx_command_t *cmd, void *
     */
 
 
-   
+
     /*
     ngx_http_core_loc_conf_t  *clcf;
 
@@ -506,7 +561,7 @@ static ngx_int_t ngx_http_webtcl_postconfig(ngx_conf_t *cf)
 
 #define USE_MODULE_LOC_CONF(name) \
     ngx_http_webtcl_loc_conf_t *name = ngx_http_get_module_loc_conf(r, ngx_http_webtcl_module);
-  
+
 static ngx_int_t ngx_http_webtcl_handler_preaccess(ngx_http_request_t *r)
 {
     USE_MODULE_LOC_CONF(webtcl_conf);
@@ -521,12 +576,12 @@ static ngx_int_t ngx_http_webtcl_handler_preaccess(ngx_http_request_t *r)
     ngx_array_t *webtcl_cmds = webtcl_conf->webtcl_cmds.elts;
 
     fprintf(stderr, "see N webtcl %ld\n", webtcl_conf->webtcl_cmds.nelts);
-    
+
     for(ngx_uint_t i=0, n=webtcl_conf->webtcl_cmds.nelts; i<n; i++){
        ngx_str_t *argv = webtcl_cmds[i].elts;
        ngx_uint_t argc = webtcl_cmds[i].nelts;
        fprintf(stderr, "see argc = %ld\n", argc);
-    
+
        for(ngx_uint_t j=0; j<argc; j++){
           fprintf(stderr, "see arg = %.*s\n", (int) argv[j].len, argv[j].data);
        }
@@ -595,6 +650,7 @@ static ngx_int_t ngx_http_webtcl_handler_content(ngx_http_request_t *r)
 	    buf->last = ngx_sprintf(buf->last, "%s", "Error: when run 'webtcl content'");
           }
 	  Tcl_Release(interp);
+          ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "webtcl content done");
        }else if( ngx_str_equal("header", subcmd) ){
          ngx_str_t *arg_name  = argv+2;
          ngx_str_t *arg_value = argv+3;
